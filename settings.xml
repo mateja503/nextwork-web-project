@@ -1,33 +1,100 @@
+<!--
+  ============================================================================
+  settings.xml  -  TELLS MAVEN WHERE TO DOWNLOAD DEPENDENCIES FROM
+
+  By default Maven downloads everything from public Maven Central. This file
+  redirects it to our PRIVATE AWS CodeArtifact repository instead.
+
+  Why bother? So builds do not depend on a third party staying online, and so
+  dependencies get cached in our own AWS account. If an upstream artifact is
+  ever removed from Maven Central, our builds keep working.
+
+  Used via the -s flag:  mvn -s settings.xml compile
+  Forget the -s flag and Maven ignores this file entirely and silently goes
+  back to Maven Central.
+
+  CRITICAL: the <id> value is identical in all three blocks below
+  (nextwork-nextwork-devops-cicd). That is REQUIRED, not a coincidence. Maven
+  matches credentials to a repository by ID. If the IDs do not match exactly,
+  Maven finds the repository but does not know which credentials to send, and
+  every download fails with a 401 Unauthorized.
+  ============================================================================
+-->
 <settings>
 
+<!--
+  SERVERS - the login details for the repository.
+-->
 <servers>
   <server>
+    <!-- Must match the <mirror> and <repository> id further down. -->
     <id>nextwork-nextwork-devops-cicd</id>
+
+    <!-- For CodeArtifact the username is always the literal string "aws".
+         It is not a placeholder and it is not your IAM user name. -->
     <username>aws</username>
+
+    <!-- The password is read from an ENVIRONMENT VARIABLE at build time.
+         NO SECRET IS STORED IN THIS FILE - this is just a placeholder.
+
+         buildspec.yml sets that variable in its pre_build phase by calling
+         "aws codeartifact get-authorization-token". The token it fetches is
+         temporary (12 hours by default), so nothing long lived is ever
+         written to disk or committed to git. -->
     <password>${env.CODEARTIFACT_AUTH_TOKEN}</password>
   </server>
 </servers>
 
+<!--
+  PROFILES - declares the CodeArtifact repository and its address.
+-->
 <profiles>
   <profile>
     <id>nextwork-nextwork-devops-cicd</id>
+
     <activation>
+      <!-- Turn this profile on automatically for every build, so no extra
+           command line flag is needed to activate it. -->
       <activeByDefault>true</activeByDefault>
     </activation>
+
     <repositories>
       <repository>
         <id>nextwork-nextwork-devops-cicd</id>
+
+        <!-- The CodeArtifact endpoint. Reading the URL left to right:
+               nextwork          the CodeArtifact DOMAIN name
+               444660173389      the AWS ACCOUNT ID that owns the domain
+               eu-central-1      the AWS REGION
+               nextwork-devops-cicd   the REPOSITORY inside the domain -->
         <url>https://nextwork-444660173389.d.codeartifact.eu-central-1.amazonaws.com/maven/nextwork-devops-cicd/</url>
       </repository>
     </repositories>
   </profile>
 </profiles>
 
+<!--
+  MIRRORS - the block that actually forces ALL traffic through CodeArtifact.
+
+  Without this, the <repository> above only gets used for dependencies Maven
+  cannot find elsewhere, and Maven would still reach out to Maven Central for
+  the rest. The mirror intercepts everything.
+-->
 <mirrors>
   <mirror>
     <id>nextwork-nextwork-devops-cicd</id>
+
+    <!-- Human readable label. Shows up in Maven's build output. -->
     <name>nextwork-nextwork-devops-cicd</name>
+
+    <!-- Same endpoint as the repository above. -->
     <url>https://nextwork-444660173389.d.codeartifact.eu-central-1.amazonaws.com/maven/nextwork-devops-cicd/</url>
+
+    <!-- THE IMPORTANT LINE. The asterisk is a wildcard meaning "mirror EVERY
+         repository". So every single dependency request, including ones aimed
+         at Maven Central, gets redirected through CodeArtifact.
+         Change this to a specific repo id and public downloads start leaking
+         out to Maven Central again. -->
     <mirrorOf>*</mirrorOf>
   </mirror>
 </mirrors>

@@ -1,21 +1,92 @@
+<!--
+  ============================================================================
+  pom.xml  -  MAVEN'S PROJECT DEFINITION ("Project Object Model")
+
+  Answers three questions for Maven:
+    1. What is this project called?      (the coordinates below)
+    2. What does it depend on?           (the dependencies block)
+    3. What kind of file should it produce?  (packaging = war)
+
+  Commands that read this file:
+    mvn compile   compile source into .class files
+    mvn package   bundle those classes into target/nextwork-web-project.war
+  Both are run by CodeBuild, see buildspec.yml.
+  ============================================================================
+-->
 <project xmlns="http://maven.apache.org/POM/4.0.0" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
   xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/maven-v4_0_0.xsd">
+
+  <!-- POM format version. Always 4.0.0 - it is a fixed literal for every
+       modern Maven project, not something you increment. -->
   <modelVersion>4.0.0</modelVersion>
+
+  <!--
+    THE COORDINATES. Together these three values uniquely identify this
+    project, the same way any dependency is identified.
+  -->
+
+  <!-- Namespace, conventionally a reversed domain name. Keeps this project
+       from colliding with anyone else's project of the same name. -->
   <groupId>com.nextwork.app</groupId>
+
+  <!-- The project's own name within that namespace. -->
   <artifactId>nextwork-web-project</artifactId>
+
+  <!-- OUTPUT TYPE. "war" (Web Application Archive) rather than the default
+       "jar", because Tomcat only deploys WARs. This one setting is what makes
+       Maven bundle everything under src/main/webapp into the output. -->
   <packaging>war</packaging>
+
+  <!-- Version number. SNAPSHOT means "in development, may change at any time",
+       as opposed to a fixed release version.
+       Note: thanks to <finalName> below, changing this does NOT change the
+       output filename, so it will not break the deploy. -->
   <version>1.0-SNAPSHOT</version>
+
+  <!-- Human readable name, shown in Maven's build output. -->
   <name>nextwork-web-project Maven Webapp</name>
+
+  <!-- Project website. Left at the Maven default placeholder - harmless and
+       purely informational. -->
   <url>http://maven.apache.org</url>
+
+  <!--
+    DEPENDENCIES - external libraries Maven downloads before building.
+    Because of settings.xml, these come from CodeArtifact, not Maven Central.
+  -->
   <dependencies>
     <dependency>
       <groupId>junit</groupId>
       <artifactId>junit</artifactId>
+
+      <!-- NOTE: JUnit 3.8.1 is ancient and is currently UNUSED. There are no
+           Java test files in this project - the real tests live in
+           run-tests.sh, which are shell based structural checks.
+           If actual unit tests ever get written, move to JUnit 5. -->
       <version>3.8.1</version>
+
+      <!-- scope "test" means this library is available when compiling and
+           running tests, but is deliberately NOT bundled into the .war.
+           Test libraries have no business shipping to production. -->
       <scope>test</scope>
     </dependency>
   </dependencies>
+
   <build>
+    <!--
+      THE MOST IMPORTANT LINE IN THIS FILE for the deployment.
+
+      By default Maven names the output after the artifactId AND the version:
+          nextwork-web-project-1.0-SNAPSHOT.war
+
+      But appspec.yml copies the artifact by an EXACT path. So the moment the
+      version changed from 1.0-SNAPSHOT to anything else, the filename would
+      change, CodeDeploy would look for a file that no longer exists, and every
+      deployment would break.
+
+      finalName pins the output to a stable name, no version attached:
+          target/nextwork-web-project.war
+    -->
     <finalName>nextwork-web-project</finalName>
   </build>
 </project>

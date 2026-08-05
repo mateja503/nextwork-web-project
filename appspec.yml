@@ -1,19 +1,97 @@
+# ============================================================================
+# appspec.yml  —  INSTRUCTIONS FOR AWS CODEDEPLOY
+#
+# Read ONLY by CodeDeploy. This file answers: "where do I PUT the .war file,
+# and what should I run before and after putting it there?"
+# (The sister file buildspec.yml answers "how do I MAKE it?")
+#
+# The filename and location are NOT optional: CodeDeploy looks for a file
+# called exactly 'appspec.yml' at the root of the deployment bundle. That is
+# why buildspec.yml lists it under artifacts - it has to travel with the .war.
+# ============================================================================
+
+# AppSpec file format version. 0.0 is the only valid value for EC2/on-premises
+# deployments. It is a fixed literal, not a version you increment.
 version: 0.0
+
+# Target operating system. Tells CodeDeploy to expect Linux paths and to run
+# the hook scripts with a shell. The other valid value is 'windows'.
 os: linux
+
+# ----------------------------------------------------------------------------
+# FILES - what to copy, and where to
+# ----------------------------------------------------------------------------
 files:
+    # WHERE THE FILE COMES FROM.
+    # Path is relative to the root of the deployment bundle, so this is the
+    # .war that buildspec.yml produced and listed under artifacts.
+    # The filename is stable (no version number) because pom.xml sets
+    # <finalName> - if it changed per version, this line would break on every
+    # version bump.
   - source: /target/nextwork-web-project.war
+
+    # WHERE IT GOES.
+    # Tomcat's webapps directory. Tomcat actively watches this folder and
+    # automatically unpacks any .war dropped into it, then serves it at a URL
+    # matching the filename:
+    #     /usr/share/tomcat/webapps/nextwork-web-project.war
+    #        becomes  http://localhost:8080/nextwork-web-project/
+    # This single line is what actually makes the new version go live.
+    # NOTE: this path is Amazon Linux specific. Ubuntu/Debian use
+    # /var/lib/tomcat9/webapps/ or similar.
     destination: /usr/share/tomcat/webapps/
+
+# ============================================================================
+# HOOKS - scripts to run at specific points in the deployment
+#
+# IMPORTANT: CodeDeploy runs these in a FIXED lifecycle order, which is NOT
+# the order they are written below. The real execution order is:
+#
+#   1. ApplicationStop    -> stop_server.sh            stop services first
+#   2. BeforeInstall      -> install_dependencies.sh   ensure Tomcat/httpd exist
+#   3. Install            -> (built in, no script)     copy the .war
+#   4. ApplicationStart   -> start_server.sh           bring services back up
+#
+# Services must stop BEFORE the .war is replaced, because you cannot reliably
+# overwrite a file that Tomcat currently holds open.
+#
+# If ANY hook exits non-zero, the deployment FAILS and CodeDeploy rolls back to
+# the last known-good revision. That rollback behaviour was deliberately tested
+# on this project - see LEARNING-LOG / commit 8b10901.
+# ============================================================================
 hooks:
+
+  # --- Runs 2nd -------------------------------------------------------------
+  # After services are stopped, before the .war is copied in.
+  # Installs Tomcat and httpd and writes the Apache reverse-proxy config.
   BeforeInstall:
     - location: scripts/install_dependencies.sh
+      # Give up after 300 seconds (5 min) and fail the deployment. Prevents a
+      # hung script from blocking the pipeline forever. yum installs on a slow
+      # instance can genuinely take a couple of minutes.
       timeout: 300
+      # Run as root - installing packages and writing to /etc/httpd/ both
+      # require root privileges.
       runas: root
+
+  # --- Runs 4th (LAST) ------------------------------------------------------
+  # After the .war is in place. Starts Tomcat and httpd so the new version is
+  # actually being served.
   ApplicationStart:
     - location: scripts/start_server.sh
       timeout: 300
       runas: root
+
+  # --- Runs 1st (FIRST) -----------------------------------------------------
+  # Stops httpd and Tomcat so the .war can be safely replaced.
+  #
+  # THE BIG GOTCHA: this hook is executed from the PREVIOUSLY DEPLOYED
+  # revision, not the one being deployed now. So if you ever push a broken
+  # stop_server.sh, it gets stuck - every later deployment keeps running the
+  # broken copy already sitting on the instance, and pushing a fix does not
+  # help, because the fix cannot be installed until the broken stop script
+  # succeeds. Recovering means fixing the file manually on the instance.
   ApplicationStop:
     - location: scripts/stop_server.sh
       timeout: 300
       runas: root
-

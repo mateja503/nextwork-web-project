@@ -1,34 +1,135 @@
+# ============================================================================
+# buildspec.yml  —  INSTRUCTIONS FOR AWS CODEBUILD
+#
+# Read ONLY by CodeBuild. This file answers: "how do I MAKE the .war file?"
+# (The sister file appspec.yml answers "where do I PUT it?" and is read only
+#  by CodeDeploy. The two never read each other.)
+#
+# CodeBuild runs the phases below in a fixed order:
+#   install -> pre_build -> build -> post_build
+# If any command exits non-zero, the build stops and the pipeline fails.
+# ============================================================================
+
+# Buildspec file format version. Must be 0.2 - it is the current standard.
+# Version 0.1 ran every command in its own separate shell, so variables did
+# not survive from one line to the next. 0.2 runs all commands in the same
+# shell, which is why the exported token below is still available later.
 version: 0.2
 
 phases:
+
+  # --------------------------------------------------------------------------
+  # PHASE 1: INSTALL - set up the build environment (no project code runs yet)
+  # --------------------------------------------------------------------------
   install:
     runtime-versions:
+      # Use Amazon Corretto 8 (Amazon's free, supported build of Java 8).
+      # This must be able to compile the project - if you upgrade the Java
+      # version in pom.xml, change it here too or the build breaks.
       java: corretto8
+
+  # --------------------------------------------------------------------------
+  # PHASE 2: PRE_BUILD - authenticate to CodeArtifact BEFORE Maven runs
+  #
+  # This is the phase that requires IAM permissions. The CodeBuild service
+  # role needs:
+  #   codeartifact:GetAuthorizationToken
+  #   codeartifact:ReadFromRepository
+  #   codeartifact:GetRepositoryEndpoint
+  #   sts:GetServiceBearerToken   <- easy to forget, breaks auth without it
+  # --------------------------------------------------------------------------
   pre_build:
     commands:
+      # Progress message - shows up in the CodeBuild log to mark where we are.
       - echo Logging in to AWS CodeArtifact...
+
+      # Ask AWS for a temporary password (a "bearer token") for CodeArtifact.
+      # CodeArtifact is a PRIVATE repository, so unlike public Maven Central it
+      # refuses anonymous downloads. Breaking the flags down:
+      #   --domain nextwork       the CodeArtifact domain name
+      #   --domain-owner ...      the AWS account ID that owns the domain
+      #   --region eu-central-1   where the domain lives
+      #   --query authorizationToken   pull just the token out of the JSON reply
+      #   --output text           print it raw, with no surrounding quotes
+      # The backticks capture the command's output into the variable.
+      # The token is temporary (12 hours by default), so nothing long-lived is
+      # ever stored anywhere.
       - CODEARTIFACT_AUTH_TOKEN=`aws codeartifact get-authorization-token --domain nextwork --domain-owner 444660173389 --region eu-central-1 --query authorizationToken --output text`
+
+      # Export makes the variable visible to CHILD processes - specifically to
+      # Maven. settings.xml reads it as ${env.CODEARTIFACT_AUTH_TOKEN}.
+      # Without this export the variable exists only in this shell, Maven never
+      # sees it, and every dependency download fails with a 401.
       - export CODEARTIFACT_AUTH_TOKEN
+
+  # --------------------------------------------------------------------------
+  # PHASE 3: BUILD - test first, then compile
+  # --------------------------------------------------------------------------
   build:
     commands:
+      # Banner lines. Purely cosmetic, but they make the CodeBuild log far
+      # easier to scan when you are hunting for where something failed.
       - echo "====== BEGINNING TEST PHASE ======"
       - echo "Running tests on `date`"
+
+      # Give the test script permission to execute. Git does not always
+      # preserve the executable bit across clones, so setting it here rather
+      # than relying on the committed file mode avoids a "permission denied".
       - chmod +x run-tests.sh
+
+      # Run the tests. If run-tests.sh exits non-zero the build STOPS HERE and
+      # nothing gets compiled, packaged or deployed.
+      #
+      # Why tests run BEFORE compiling: the checks take under a second, a Maven
+      # compile takes much longer. If the project structure is broken there is
+      # no reason to pay for the compile. This is "fail fast".
       - ./run-tests.sh
       - echo "====== TEST PHASE COMPLETE ======"
+
       - echo "====== BEGINNING BUILD PHASE ======"
       - echo "Build started on `date`"
+
+      # Compile the Java source into .class files.
+      #   -s settings.xml   IS MANDATORY. It tells Maven to use our custom
+      #                     settings file. Without it Maven silently ignores
+      #                     CodeArtifact and falls back to public Maven Central.
       - mvn -s settings.xml compile
       - echo "====== BUILD PHASE COMPLETE ======"
-  
+
+  # --------------------------------------------------------------------------
+  # PHASE 4: POST_BUILD - package the compiled code into a deployable .war
+  # --------------------------------------------------------------------------
   post_build:
     commands:
       - echo "Build completed on `date`"
+
+      # 'package' bundles the compiled classes plus everything in
+      # src/main/webapp into a single .war archive under target/.
+      # Because pom.xml sets <finalName>, the output filename is always
+      # target/nextwork-web-project.war regardless of the project version.
       - mvn -s settings.xml package
 
+# ============================================================================
+# ARTIFACTS - what gets handed to the DEPLOY stage
+#
+# Easy to overlook, but critical. Anything NOT listed here is thrown away when
+# the build container is destroyed. CodeDeploy needs all three entries below;
+# omit appspec.yml or scripts/ and the build succeeds but the deploy instantly
+# fails with "appspec file not found".
+# ============================================================================
 artifacts:
   files:
+    # The application itself - what actually gets deployed.
     - target/nextwork-web-project.war
+    # The deployment instructions. CodeDeploy looks for this by name at the
+    # root of the bundle.
     - appspec.yml
+    # Every file in scripts/, recursively - the lifecycle hook scripts that
+    # appspec.yml calls by path.
     - scripts/**/*
+
+  # Keep the folder structure intact.
+  # If this were 'yes', every file would be flattened into one directory and
+  # scripts/start_server.sh would become just start_server.sh - breaking every
+  # path referenced in appspec.yml.
   discard-paths: no
